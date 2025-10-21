@@ -190,13 +190,10 @@ If you encounter memory errors with large files:
 5. ✅ Re-run analysis to confirm fixes
 
 ### Continuous Integration
-
 Consider running this script as part of your ontology development pipeline to catch conflicts early.
 
 ## Contributing
-
 To extend the conflict detector:
-
 - Add new conflict detection methods to the `OntologyConflictDetector` class
 - Follow the priority system (1=Critical, 2=Semantic, 3=Quality)
 - Include source file information in all conflict reports
