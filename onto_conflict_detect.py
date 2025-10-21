@@ -79,14 +79,15 @@ class OntologyConflictDetector:
                 print(f"Unexpected error loading {file_path}: {e}")
                 continue
 
-        self.era = Namespace("http://www.data.europa.eu/949/")
-        
-        # Bind common namespaces
-        self.combined_graph.bind("era", self.era)
-        self.combined_graph.bind("owl", OWL)
-        self.combined_graph.bind("rdf", RDF)
-        self.combined_graph.bind("rdfs", RDFS)
-        self.combined_graph.bind("skos", SKOS)
+    # Use a generic namespace for merged ontologies
+    self.merged_namespace = Namespace("http://example.org/merged_namespace#")
+
+    # Bind common namespaces (agnostic)
+    self.combined_graph.bind("merged", self.merged_namespace)
+    self.combined_graph.bind("owl", OWL)
+    self.combined_graph.bind("rdf", RDF)
+    self.combined_graph.bind("rdfs", RDFS)
+    self.combined_graph.bind("skos", SKOS)
 
     def setup_logging(self):
         """Set up logging to both console and file"""

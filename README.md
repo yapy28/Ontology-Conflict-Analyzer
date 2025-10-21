@@ -58,11 +58,11 @@ Options:
 ### Examples
 
 ```bash
-# Analyze ERA ontologies with custom output directory
+# Analyze multiple ontologies with custom output directory
 python "onto_conflict_detect.py" *.ttl -o analysis_results
 
 # Analyze with custom log name
-python "onto_conflict_detect.py" ERA.ttl NeTEx.ttl -l era_netex_conflicts.log
+python "onto_conflict_detect.py" ontology1.ttl ontology2.ttl -l custom_conflicts.log
 
 # Analyze all TTL files in current directory
 python "onto_conflict_detect.py" *.ttl
