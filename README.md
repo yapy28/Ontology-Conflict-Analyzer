@@ -52,8 +52,35 @@ python "onto_conflict_detect.py" [files] [options]
 Options:
   -o, --output-dir DIR    Output directory for log files (default: logs)
   -l, --log-name NAME     Custom log file name (default: auto-generated)
+  -a, --agnostic          Enable namespace-agnostic mode (compare by local names)
   -h, --help             Show help message
 ```
+
+#### Namespace-Agnostic Mode
+
+The `--agnostic` (or `-a`) flag enables namespace-agnostic comparison mode. In this mode, the detector groups ontology elements by their **local names** (the part after `#` or the last `/` in the URI) rather than comparing full URIs.
+
+**When to use:**
+- Comparing ontologies from different organizations with different namespaces
+- Finding potential semantic duplicates across namespace boundaries
+- Harmonizing terminology before formally merging ontologies
+- Detecting unintentional naming conflicts in distributed development
+
+**Example:**
+```bash
+# Compare by local names across namespaces
+python "onto_conflict_detect.py" file1.ttl file2.ttl --agnostic
+
+# Normal mode: compare exact URIs (default)
+python "onto_conflict_detect.py" file1.ttl file2.ttl
+```
+
+In agnostic mode, URIs like `http://example.org#Vehicle` and `http://different.org#Vehicle` will be grouped together and compared, even though they have different namespaces. The output will show:
+- **NAMESPACE-AGNOSTIC URI GROUPS**: URIs with the same local name
+- **MERGE-BREAKING conflicts**: Structural incompatibilities (types, domains, ranges)
+- **SEMANTIC CANDIDATES**: Label or comment differences
+
+See `examples/agnostic_example.md` for a detailed walkthrough.
 
 ### Examples
 
@@ -199,7 +226,33 @@ To extend the conflict detector:
 - Include source file information in all conflict reports
 - Add appropriate emoji indicators for visual clarity
 
+## Testing
+
+### Running Tests
+
+To verify the agnostic mode functionality:
+
+```bash
+cd tests
+python test_agnostic_mode.py
+```
+
+This smoke test verifies that:
+- The `--agnostic` flag is properly recognized
+- Agnostic mode banner appears in output
+- Namespace-agnostic grouping occurs correctly
+- Default mode continues to work without the flag
+
+### Test Files
+
+The `tests/` directory contains example ontology files:
+- `example1.ttl`: Sample ontology with namespace `http://example.org/ontology1#`
+- `example2.ttl`: Sample ontology with namespace `http://different.org/vocab#`
+
+Both files define similar concepts (`Vehicle`, `Car`, `hasOwner`) with the same local names but different namespaces and labels, making them ideal for demonstrating agnostic mode.
+
 ## Version History
 
+- v3: Added namespace-agnostic comparison mode with `--agnostic` flag
 - v2: Added priority-based conflict categorization, improved inverse property detection, enhanced logging
 - v1: Initial version with basic conflict detection

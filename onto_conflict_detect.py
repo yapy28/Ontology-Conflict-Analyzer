@@ -32,7 +32,7 @@ class Logger:
         self.log.close()
 
 class OntologyConflictDetector:
-    def __init__(self, ontology_files, log_file=None):
+    def __init__(self, ontology_files, log_file=None, agnostic=False):
         """Initialize with multiple ontology files for pre-merge analysis"""
         if isinstance(ontology_files, str):
             self.ontology_files = [ontology_files]
@@ -44,6 +44,9 @@ class OntologyConflictDetector:
             self.log_file = f"conflict_analysis_{timestamp}.log"
         else:
             self.log_file = log_file
+        
+        # Namespace-agnostic mode flag
+        self.agnostic = agnostic
         
         # Initialize logger
         self.logger = None
@@ -89,10 +92,37 @@ class OntologyConflictDetector:
     self.combined_graph.bind("rdfs", RDFS)
     self.combined_graph.bind("skos", SKOS)
 
+    def get_local_name(self, uri):
+        """Extract local name from URI (fragment after '#' or last segment after '/')"""
+        uri_str = str(uri)
+        # Try fragment first (after '#')
+        if '#' in uri_str:
+            return uri_str.split('#')[-1]
+        # Otherwise use last segment after '/'
+        elif '/' in uri_str:
+            return uri_str.rstrip('/').split('/')[-1]
+        # Fallback to full URI if no separators
+        return uri_str
+    
+    def normalize_uri(self, uri):
+        """Return normalized local name for comparison (lowercased, whitespace trimmed)"""
+        local_name = self.get_local_name(uri)
+        return local_name.lower().strip()
+
     def setup_logging(self):
         """Set up logging to both console and file"""
         self.logger = Logger(self.log_file)
         sys.stdout = self.logger
+        
+        # Write agnostic mode banner if enabled
+        if self.agnostic:
+            print("=" * 80)
+            print("🔍 RUNNING IN NAMESPACE-AGNOSTIC MODE")
+            print("=" * 80)
+            print("URIs with the same local name but different namespaces will be")
+            print("grouped together for comparison and conflict detection.")
+            print("=" * 80)
+            print()
         
         print(f"Ontology Files: {', '.join([Path(f).name for f in self.ontology_files])}")
         print(f"Log File: {self.log_file}")
@@ -112,102 +142,237 @@ class OntologyConflictDetector:
         print("\n🔴 PRIORITY 1: URI COLLISION DETECTION")
         print("=" * 50)
         
-        uri_definitions = defaultdict(list)
-        
-        # Collect all URI definitions from each ontology
-        for file_path, graph in self.graphs.items():
-            file_name = Path(file_path).name
+        if self.agnostic:
+            # Namespace-agnostic mode: group by normalized local name
+            uri_definitions = defaultdict(list)
             
-            # Check classes
-            for uri in graph.subjects(RDF.type, OWL.Class):
-                labels = list(graph.objects(uri, RDFS.label))
-                comments = list(graph.objects(uri, RDFS.comment))
-                equivalent_classes = list(graph.objects(uri, OWL.equivalentClass))
+            # Collect all URI definitions from each ontology
+            for file_path, graph in self.graphs.items():
+                file_name = Path(file_path).name
                 
-                uri_definitions[str(uri)].append({
-                    'file': file_name,
-                    'type': 'Class',
-                    'labels': [str(l) for l in labels],
-                    'comments': [str(c) for c in comments],
-                    'equivalent_classes': [str(e) for e in equivalent_classes]
-                })
-            
-            # Check properties
-            for prop_type in [OWL.ObjectProperty, OWL.DatatypeProperty, OWL.FunctionalProperty]:
-                for uri in graph.subjects(RDF.type, prop_type):
+                # Check classes
+                for uri in graph.subjects(RDF.type, OWL.Class):
                     labels = list(graph.objects(uri, RDFS.label))
-                    domains = list(graph.objects(uri, RDFS.domain))
-                    ranges = list(graph.objects(uri, RDFS.range))
+                    comments = list(graph.objects(uri, RDFS.comment))
+                    equivalent_classes = list(graph.objects(uri, OWL.equivalentClass))
+                    
+                    normalized = self.normalize_uri(uri)
+                    local_name = self.get_local_name(uri)
+                    
+                    uri_definitions[normalized].append({
+                        'full_uri': str(uri),
+                        'local_name': local_name,
+                        'file': file_name,
+                        'type': 'Class',
+                        'labels': [str(l) for l in labels],
+                        'comments': [str(c) for c in comments],
+                        'equivalent_classes': [str(e) for e in equivalent_classes]
+                    })
+                
+                # Check properties
+                for prop_type in [OWL.ObjectProperty, OWL.DatatypeProperty, OWL.FunctionalProperty]:
+                    for uri in graph.subjects(RDF.type, prop_type):
+                        labels = list(graph.objects(uri, RDFS.label))
+                        domains = list(graph.objects(uri, RDFS.domain))
+                        ranges = list(graph.objects(uri, RDFS.range))
+                        
+                        normalized = self.normalize_uri(uri)
+                        local_name = self.get_local_name(uri)
+                        
+                        uri_definitions[normalized].append({
+                            'full_uri': str(uri),
+                            'local_name': local_name,
+                            'file': file_name,
+                            'type': str(prop_type).split('#')[1],
+                            'labels': [str(l) for l in labels],
+                            'domains': [str(d) for d in domains],
+                            'ranges': [str(r) for r in ranges]
+                        })
+            
+            # Find conflicts based on normalized local names
+            conflicts_found = 0
+            for normalized_name, definitions in uri_definitions.items():
+                # Check if multiple distinct full URIs share this local name
+                full_uris = set(d['full_uri'] for d in definitions)
+                
+                if len(full_uris) > 1:
+                    # Multiple URIs with same local name - check for conflicts
+                    print(f"\n🌐 NAMESPACE-AGNOSTIC URI GROUP: '{normalized_name}'")
+                    print(f"   Local name appears in {len(full_uris)} different URIs:")
+                    
+                    # Show all URIs in the group
+                    for uri in sorted(full_uris):
+                        uri_defs = [d for d in definitions if d['full_uri'] == uri]
+                        files = [d['file'] for d in uri_defs]
+                        print(f"   - {uri}")
+                        print(f"     Files: {', '.join(files)}")
+                    
+                    # Check for conflicting definitions
+                    labels = set()
+                    types = set()
+                    ranges = set()
+                    domains = set()
+                    
+                    for defn in definitions:
+                        labels.update(defn.get('labels', []))
+                        types.add(defn.get('type', ''))
+                        ranges.update(defn.get('ranges', []))
+                        domains.update(defn.get('domains', []))
+                    
+                    has_merge_conflict = False
+                    has_semantic_conflict = False
+                    
+                    # Type conflicts - check across URIs
+                    if len(types) > 1 and '' not in types:
+                        # Check if this is just a valid OWL combination
+                        valid_combo = False
+                        
+                        # FunctionalProperty can be combined with either ObjectProperty or DatatypeProperty
+                        if types == {'FunctionalProperty', 'ObjectProperty'} or types == {'FunctionalProperty', 'DatatypeProperty'}:
+                            valid_combo = True
+                        
+                        # Only flag if it's not a valid combination
+                        if not valid_combo:
+                            print(f"\n   ⚠️  MERGE-BREAKING: Type conflict across namespaces")
+                            print(f"      Different types: {', '.join(types)}")
+                            for defn in definitions:
+                                print(f"      - {defn['full_uri']}: {defn['type']} (in {defn['file']})")
+                            has_merge_conflict = True
+                    
+                    # Range conflicts for properties
+                    if len(ranges) > 1 and '' not in ranges:
+                        print(f"\n   ⚠️  MERGE-BREAKING: Range conflict across namespaces")
+                        print(f"      Different ranges: {', '.join(ranges)}")
+                        for defn in definitions:
+                            if defn.get('ranges'):
+                                print(f"      - {defn['full_uri']}: {', '.join(defn['ranges'])} (in {defn['file']})")
+                        has_merge_conflict = True
+                    
+                    # Domain conflicts for properties
+                    if len(domains) > 1 and '' not in domains:
+                        print(f"\n   ⚠️  MERGE-BREAKING: Domain conflict across namespaces")
+                        print(f"      Different domains: {', '.join(domains)}")
+                        for defn in definitions:
+                            if defn.get('domains'):
+                                print(f"      - {defn['full_uri']}: {', '.join(defn['domains'])} (in {defn['file']})")
+                        has_merge_conflict = True
+                    
+                    # Label conflicts (significant differences)
+                    if len(labels) > 1:
+                        # Check if labels are significantly different (not just case/whitespace)
+                        normalized_labels = {l.lower().strip() for l in labels if l}
+                        if len(normalized_labels) > 1:
+                            print(f"\n   ℹ️  SEMANTIC CANDIDATE: Label differences")
+                            print(f"      Different labels: {', '.join(labels)}")
+                            for defn in definitions:
+                                if defn.get('labels'):
+                                    print(f"      - {defn['full_uri']}: {', '.join(defn['labels'])} (in {defn['file']})")
+                            has_semantic_conflict = True
+                    
+                    if has_merge_conflict or has_semantic_conflict:
+                        conflicts_found += 1
+            
+            print(f"\n📊 URI COLLISION SUMMARY (AGNOSTIC MODE): {conflicts_found} conflict groups found")
+            print("   These represent URIs with identical local names across different namespaces.")
+            
+        else:
+            # Original exact-URI comparison mode
+            uri_definitions = defaultdict(list)
+            
+            # Collect all URI definitions from each ontology
+            for file_path, graph in self.graphs.items():
+                file_name = Path(file_path).name
+                
+                # Check classes
+                for uri in graph.subjects(RDF.type, OWL.Class):
+                    labels = list(graph.objects(uri, RDFS.label))
+                    comments = list(graph.objects(uri, RDFS.comment))
+                    equivalent_classes = list(graph.objects(uri, OWL.equivalentClass))
                     
                     uri_definitions[str(uri)].append({
                         'file': file_name,
-                        'type': str(prop_type).split('#')[1],
+                        'type': 'Class',
                         'labels': [str(l) for l in labels],
-                        'domains': [str(d) for d in domains],
-                        'ranges': [str(r) for r in ranges]
+                        'comments': [str(c) for c in comments],
+                        'equivalent_classes': [str(e) for e in equivalent_classes]
                     })
-        
-        # Find conflicts
-        conflicts_found = 0
-        for uri, definitions in uri_definitions.items():
-            if len(definitions) > 1:
-                # Check for conflicting definitions
-                labels = set()
-                types = set()
-                ranges = set()
-                domains = set()
                 
-                for defn in definitions:
-                    labels.update(defn.get('labels', []))
-                    types.add(defn.get('type', ''))
-                    ranges.update(defn.get('ranges', []))
-                    domains.update(defn.get('domains', []))
-                
-                has_conflict = False
-                
-                # Type conflicts - modified to ignore valid OWL combinations
-                if len(types) > 1 and '' not in types:
-                    # Check if this is just a valid OWL property combination
-                    valid_combo = False
+                # Check properties
+                for prop_type in [OWL.ObjectProperty, OWL.DatatypeProperty, OWL.FunctionalProperty]:
+                    for uri in graph.subjects(RDF.type, prop_type):
+                        labels = list(graph.objects(uri, RDFS.label))
+                        domains = list(graph.objects(uri, RDFS.domain))
+                        ranges = list(graph.objects(uri, RDFS.range))
+                        
+                        uri_definitions[str(uri)].append({
+                            'file': file_name,
+                            'type': str(prop_type).split('#')[1],
+                            'labels': [str(l) for l in labels],
+                            'domains': [str(d) for d in domains],
+                            'ranges': [str(r) for r in ranges]
+                        })
+            
+            # Find conflicts
+            conflicts_found = 0
+            for uri, definitions in uri_definitions.items():
+                if len(definitions) > 1:
+                    # Check for conflicting definitions
+                    labels = set()
+                    types = set()
+                    ranges = set()
+                    domains = set()
                     
-                    # FunctionalProperty can be combined with either ObjectProperty or DatatypeProperty
-                    if types == {'FunctionalProperty', 'ObjectProperty'} or types == {'FunctionalProperty', 'DatatypeProperty'}:
-                        valid_combo = True
-                    
-                    # Only flag if it's not a valid combination
-                    if not valid_combo:
-                        print(f"\n⚠️  URI TYPE CONFLICT: {uri}")
-                        print(f"   Different types across files: {', '.join(types)}")
-                        for defn in definitions:
-                            print(f"   - {defn['file']}: {defn['type']}")
-                        has_conflict = True
-                
-                # Range conflicts for properties
-                if len(ranges) > 1 and '' not in ranges:
-                    print(f"\n⚠️  PROPERTY RANGE CONFLICT: {uri}")
-                    print(f"   Different ranges: {', '.join(ranges)}")
                     for defn in definitions:
-                        if defn.get('ranges'):
-                            print(f"   - {defn['file']}: {', '.join(defn['ranges'])}")
-                    has_conflict = True
-                
-                # Label conflicts (significant differences)
-                if len(labels) > 1:
-                    # Check if labels are significantly different (not just case/whitespace)
-                    normalized_labels = {l.lower().strip() for l in labels if l}
-                    if len(normalized_labels) > 1:
-                        print(f"\n⚠️  LABEL CONFLICT: {uri}")
-                        print(f"   Different labels: {', '.join(labels)}")
+                        labels.update(defn.get('labels', []))
+                        types.add(defn.get('type', ''))
+                        ranges.update(defn.get('ranges', []))
+                        domains.update(defn.get('domains', []))
+                    
+                    has_conflict = False
+                    
+                    # Type conflicts - modified to ignore valid OWL combinations
+                    if len(types) > 1 and '' not in types:
+                        # Check if this is just a valid OWL property combination
+                        valid_combo = False
+                        
+                        # FunctionalProperty can be combined with either ObjectProperty or DatatypeProperty
+                        if types == {'FunctionalProperty', 'ObjectProperty'} or types == {'FunctionalProperty', 'DatatypeProperty'}:
+                            valid_combo = True
+                        
+                        # Only flag if it's not a valid combination
+                        if not valid_combo:
+                            print(f"\n⚠️  URI TYPE CONFLICT: {uri}")
+                            print(f"   Different types across files: {', '.join(types)}")
+                            for defn in definitions:
+                                print(f"   - {defn['file']}: {defn['type']}")
+                            has_conflict = True
+                    
+                    # Range conflicts for properties
+                    if len(ranges) > 1 and '' not in ranges:
+                        print(f"\n⚠️  PROPERTY RANGE CONFLICT: {uri}")
+                        print(f"   Different ranges: {', '.join(ranges)}")
                         for defn in definitions:
-                            if defn.get('labels'):
-                                print(f"   - {defn['file']}: {', '.join(defn['labels'])}")
+                            if defn.get('ranges'):
+                                print(f"   - {defn['file']}: {', '.join(defn['ranges'])}")
                         has_conflict = True
-                
-                if has_conflict:
-                    conflicts_found += 1
-        
-        print(f"\n📊 URI COLLISION SUMMARY: {conflicts_found} conflicts found")
-        print("   These conflicts will break ontology merging!")
+                    
+                    # Label conflicts (significant differences)
+                    if len(labels) > 1:
+                        # Check if labels are significantly different (not just case/whitespace)
+                        normalized_labels = {l.lower().strip() for l in labels if l}
+                        if len(normalized_labels) > 1:
+                            print(f"\n⚠️  LABEL CONFLICT: {uri}")
+                            print(f"   Different labels: {', '.join(labels)}")
+                            for defn in definitions:
+                                if defn.get('labels'):
+                                    print(f"   - {defn['file']}: {', '.join(defn['labels'])}")
+                            has_conflict = True
+                    
+                    if has_conflict:
+                        conflicts_found += 1
+            
+            print(f"\n📊 URI COLLISION SUMMARY: {conflicts_found} conflicts found")
+            print("   These conflicts will break ontology merging!")
         
         return conflicts_found
 
@@ -216,39 +381,80 @@ class OntologyConflictDetector:
         print("\n🔴 PRIORITY 1: PROPERTY TYPE CONFLICTS")
         print("=" * 50)
         
-        property_types = defaultdict(set)
-        
-        # Collect property types from all ontologies
-        for file_path, graph in self.graphs.items():
-            file_name = Path(file_path).name
+        if self.agnostic:
+            # Namespace-agnostic mode: group by normalized local name
+            property_types = defaultdict(set)
             
-            for prop_type in [OWL.ObjectProperty, OWL.DatatypeProperty, OWL.FunctionalProperty]:
-                for prop in graph.subjects(RDF.type, prop_type):
-                    property_types[str(prop)].add((str(prop_type).split('#')[1], file_name))
-        
-        # Find REAL conflicts (only ObjectProperty vs DatatypeProperty)
-        conflicts = []
-        for prop, types in property_types.items():
-            type_names = {t[0] for t in types}
+            # Collect property types from all ontologies
+            for file_path, graph in self.graphs.items():
+                file_name = Path(file_path).name
+                
+                for prop_type in [OWL.ObjectProperty, OWL.DatatypeProperty, OWL.FunctionalProperty]:
+                    for prop in graph.subjects(RDF.type, prop_type):
+                        normalized = self.normalize_uri(prop)
+                        full_uri = str(prop)
+                        type_name = str(prop_type).split('#')[1]
+                        property_types[normalized].add((type_name, file_name, full_uri))
             
-            # Check for the ONLY real conflict: ObjectProperty vs DatatypeProperty
-            has_object = 'ObjectProperty' in type_names
-            has_datatype = 'DatatypeProperty' in type_names
+            # Find REAL conflicts (only ObjectProperty vs DatatypeProperty)
+            conflicts = []
+            for normalized_name, type_info in property_types.items():
+                type_names = {t[0] for t in type_info}
+                
+                # Check for the ONLY real conflict: ObjectProperty vs DatatypeProperty
+                has_object = 'ObjectProperty' in type_names
+                has_datatype = 'DatatypeProperty' in type_names
+                
+                if has_object and has_datatype:
+                    conflicts.append((normalized_name, type_info))
             
-            if has_object and has_datatype:
-                conflicts.append((prop, types))
-        
-        if conflicts:
-            print(f"Found {len(conflicts)} REAL property type conflicts:")
-            for prop, types in conflicts[:10]:  # Show first 10
-                print(f"\n⚠️  {prop}")
-                for type_name, file_name in types:
-                    print(f"   - {type_name} in {file_name}")
-            print("\n   Note: These are genuine conflicts - a property cannot be both")
-            print("         ObjectProperty and DatatypeProperty simultaneously.")
+            if conflicts:
+                print(f"Found {len(conflicts)} REAL property type conflicts (across namespaces):")
+                for normalized_name, type_info in conflicts[:10]:  # Show first 10
+                    print(f"\n⚠️  Local name: '{normalized_name}'")
+                    for type_name, file_name, full_uri in type_info:
+                        print(f"   - {type_name}: {full_uri} (in {file_name})")
+                print("\n   Note: These are genuine conflicts - a property cannot be both")
+                print("         ObjectProperty and DatatypeProperty simultaneously,")
+                print("         even across different namespaces.")
+            else:
+                print("✅ No property type conflicts found (namespace-agnostic)")
+                print("   (FunctionalProperty can coexist with ObjectProperty or DatatypeProperty)")
         else:
-            print("✅ No property type conflicts found")
-            print("   (FunctionalProperty can coexist with ObjectProperty or DatatypeProperty)")
+            # Original exact-URI mode
+            property_types = defaultdict(set)
+            
+            # Collect property types from all ontologies
+            for file_path, graph in self.graphs.items():
+                file_name = Path(file_path).name
+                
+                for prop_type in [OWL.ObjectProperty, OWL.DatatypeProperty, OWL.FunctionalProperty]:
+                    for prop in graph.subjects(RDF.type, prop_type):
+                        property_types[str(prop)].add((str(prop_type).split('#')[1], file_name))
+            
+            # Find REAL conflicts (only ObjectProperty vs DatatypeProperty)
+            conflicts = []
+            for prop, types in property_types.items():
+                type_names = {t[0] for t in types}
+                
+                # Check for the ONLY real conflict: ObjectProperty vs DatatypeProperty
+                has_object = 'ObjectProperty' in type_names
+                has_datatype = 'DatatypeProperty' in type_names
+                
+                if has_object and has_datatype:
+                    conflicts.append((prop, types))
+            
+            if conflicts:
+                print(f"Found {len(conflicts)} REAL property type conflicts:")
+                for prop, types in conflicts[:10]:  # Show first 10
+                    print(f"\n⚠️  {prop}")
+                    for type_name, file_name in types:
+                        print(f"   - {type_name} in {file_name}")
+                print("\n   Note: These are genuine conflicts - a property cannot be both")
+                print("         ObjectProperty and DatatypeProperty simultaneously.")
+            else:
+                print("✅ No property type conflicts found")
+                print("   (FunctionalProperty can coexist with ObjectProperty or DatatypeProperty)")
         
         return len(conflicts)
 
@@ -259,31 +465,85 @@ class OntologyConflictDetector:
         print("\n🟡 PRIORITY 2: SEMANTIC DUPLICATE DETECTION")
         print("=" * 50)
         
-        # Group classes by their labels (case-insensitive)
-        label_groups = defaultdict(list)
+        if self.agnostic:
+            # Namespace-agnostic mode: group by normalized local name AND label
+            # Combine both name-based and label-based grouping
+            name_groups = defaultdict(list)
+            label_groups = defaultdict(list)
+            
+            for uri in self.combined_graph.subjects(RDF.type, OWL.Class):
+                # Group by normalized local name
+                normalized_name = self.normalize_uri(uri)
+                name_groups[normalized_name].append(str(uri))
+                
+                # Also group by labels
+                labels = list(self.combined_graph.objects(uri, RDFS.label))
+                for label in labels:
+                    normalized_label = str(label).lower().strip()
+                    if normalized_label:
+                        label_groups[normalized_label].append(str(uri))
+            
+            # Report name-based duplicates
+            duplicates_found = 0
+            seen_uris = set()
+            
+            print("\n📌 Classes grouped by local name:")
+            for name, uris in name_groups.items():
+                if len(uris) > 1:
+                    print(f"\n🔍 Local name '{name}' appears in {len(uris)} URIs:")
+                    for uri in uris:
+                        # Find which file this URI comes from
+                        source_files = []
+                        for file_path, graph in self.graphs.items():
+                            if (URIRef(uri), RDF.type, OWL.Class) in graph:
+                                source_files.append(Path(file_path).name)
+                        print(f"   - {uri} (from: {', '.join(source_files)})")
+                        seen_uris.add(uri)
+                    duplicates_found += 1
+            
+            print("\n📌 Classes grouped by label (not already shown):")
+            for label, uris in label_groups.items():
+                if len(uris) > 1:
+                    # Only show if URIs weren't already reported in name groups
+                    new_uris = [u for u in uris if u not in seen_uris]
+                    if len(new_uris) > 1:
+                        print(f"\n🔍 Potential semantic duplicates for '{label}':")
+                        for uri in new_uris:
+                            # Find which file this URI comes from
+                            source_files = []
+                            for file_path, graph in self.graphs.items():
+                                if (URIRef(uri), RDF.type, OWL.Class) in graph:
+                                    source_files.append(Path(file_path).name)
+                            print(f"   - {uri} (from: {', '.join(source_files)})")
+                        duplicates_found += 1
+        else:
+            # Original label-based mode
+            # Group classes by their labels (case-insensitive)
+            label_groups = defaultdict(list)
+            
+            for uri in self.combined_graph.subjects(RDF.type, OWL.Class):
+                labels = list(self.combined_graph.objects(uri, RDFS.label))
+                for label in labels:
+                    normalized_label = str(label).lower().strip()
+                    if normalized_label:
+                        label_groups[normalized_label].append(str(uri))
+            
+            # Find potential duplicates
+            duplicates_found = 0
+            for label, uris in label_groups.items():
+                if len(uris) > 1:
+                    print(f"\n🔍 Potential semantic duplicates for '{label}':")
+                    for uri in uris:
+                        # Find which file this URI comes from
+                        source_files = []
+                        for file_path, graph in self.graphs.items():
+                            if (URIRef(uri), RDF.type, OWL.Class) in graph:
+                                source_files.append(Path(file_path).name)
+                        print(f"   - {uri} (from: {', '.join(source_files)})")
+                    duplicates_found += 1
         
-        for uri in self.combined_graph.subjects(RDF.type, OWL.Class):
-            labels = list(self.combined_graph.objects(uri, RDFS.label))
-            for label in labels:
-                normalized_label = str(label).lower().strip()
-                if normalized_label:
-                    label_groups[normalized_label].append(str(uri))
-        
-        # Find potential duplicates
-        duplicates_found = 0
-        for label, uris in label_groups.items():
-            if len(uris) > 1:
-                print(f"\n🔍 Potential semantic duplicates for '{label}':")
-                for uri in uris:
-                    # Find which file this URI comes from
-                    source_files = []
-                    for file_path, graph in self.graphs.items():
-                        if (URIRef(uri), RDF.type, OWL.Class) in graph:
-                            source_files.append(Path(file_path).name)
-                    print(f"   - {uri} (from: {', '.join(source_files)})")
-                duplicates_found += 1
-        
-        print(f"\n📊 SEMANTIC DUPLICATES SUMMARY: {duplicates_found} potential duplicate groups found")
+        mode_suffix = " (AGNOSTIC MODE)" if self.agnostic else ""
+        print(f"\n📊 SEMANTIC DUPLICATES SUMMARY{mode_suffix}: {duplicates_found} potential duplicate groups found")
         return duplicates_found
 
     def detect_equivalent_class_candidates(self):
@@ -299,7 +559,12 @@ class OntologyConflictDetector:
             comments = [str(c) for c in self.combined_graph.objects(uri, RDFS.comment)]
             
             # Extract class name from URI
-            class_name = str(uri).split('/')[-1].split('#')[-1]
+            if self.agnostic:
+                # Use normalized local name in agnostic mode
+                class_name = self.normalize_uri(uri)
+            else:
+                # Original: extract from URI
+                class_name = str(uri).split('/')[-1].split('#')[-1]
             
             class_info[str(uri)] = {
                 'name': class_name,
@@ -325,12 +590,18 @@ class OntologyConflictDetector:
                     for file_path, graph in self.graphs.items():
                         if (URIRef(uri), RDF.type, OWL.Class) in graph:
                             source_files.append(Path(file_path).name)
-                    print(f"   - {uri}")
+                    
+                    if self.agnostic:
+                        local_name = self.get_local_name(uri)
+                        print(f"   - {uri} (local: {local_name})")
+                    else:
+                        print(f"   - {uri}")
                     print(f"     Labels: {', '.join(info['labels']) if info['labels'] else 'None'}")
                     print(f"     Sources: {', '.join(source_files)}")
                 candidates_found += 1
         
-        print(f"\n📊 EQUIVALENT CLASS CANDIDATES: {candidates_found} groups found")
+        mode_suffix = " (AGNOSTIC MODE)" if self.agnostic else ""
+        print(f"\n📊 EQUIVALENT CLASS CANDIDATES{mode_suffix}: {candidates_found} groups found")
         return candidates_found
 
     # PRIORITY 3: ADDITIONAL ANALYSES
@@ -426,59 +697,100 @@ class OntologyConflictDetector:
                 if (prop, RDF.type, OWL.ObjectProperty) in graph:
                     source_files.append(Path(file_path).name)
             
-            properties.append((prop_str, labels, source_files))
+            # Store both full URI and normalized local name
+            if self.agnostic:
+                local_name = self.get_local_name(prop)
+                properties.append((prop_str, local_name, labels, source_files))
+            else:
+                properties.append((prop_str, None, labels, source_files))
         
         # Find potential inverse relationships
         inverse_candidates = []
         
-        for prop1, labels1, sources1 in properties:
-            for prop2, labels2, sources2 in properties:
-                if prop1 != prop2:
+        for i, prop_info1 in enumerate(properties):
+            for prop_info2 in properties[i+1:]:
+                if self.agnostic:
+                    prop1, local1, labels1, sources1 = prop_info1
+                    prop2, local2, labels2, sources2 = prop_info2
+                    
+                    if prop1 == prop2:
+                        continue
+                    
+                    # Check both URI-based and local name patterns
+                    prop1_name = local1 if local1 else prop1.split('/')[-1].split('#')[-1]
+                    prop2_name = local2 if local2 else prop2.split('/')[-1].split('#')[-1]
+                else:
+                    prop1, _, labels1, sources1 = prop_info1
+                    prop2, _, labels2, sources2 = prop_info2
+                    
+                    if prop1 == prop2:
+                        continue
+                    
                     # Extract property names from URIs
                     prop1_name = prop1.split('/')[-1].split('#')[-1]
                     prop2_name = prop2.split('/')[-1].split('#')[-1]
-                    
-                    # Check URI-based patterns (more reliable)
-                    for pattern1, pattern2 in inverse_patterns:
-                        if ((pattern1.lower() in prop1_name.lower() and pattern2.lower() in prop2_name.lower()) or
-                            (pattern2.lower() in prop1_name.lower() and pattern1.lower() in prop2_name.lower())):
+                
+                # Check URI-based patterns (more reliable)
+                for pattern1, pattern2 in inverse_patterns:
+                    if ((pattern1.lower() in prop1_name.lower() and pattern2.lower() in prop2_name.lower()) or
+                        (pattern2.lower() in prop1_name.lower() and pattern1.lower() in prop2_name.lower())):
+                        
+                        # Use first label if available, otherwise use property name
+                        label1 = labels1[0] if labels1 else prop1_name
+                        label2 = labels2[0] if labels2 else prop2_name
+                        
+                        if self.agnostic:
+                            inverse_candidates.append((prop1, prop2, label1, label2, sources1, sources2, local1, local2))
+                        else:
+                            inverse_candidates.append((prop1, prop2, label1, label2, sources1, sources2, None, None))
+                        break
+                
+                # Also check for exact label-based patterns (case-insensitive)
+                if labels1 and labels2:
+                    for label1 in labels1:
+                        for label2 in labels2:
+                            label1_clean = label1.lower().strip()
+                            label2_clean = label2.lower().strip()
                             
-                            # Use first label if available, otherwise use property name
-                            label1 = labels1[0] if labels1 else prop1_name
-                            label2 = labels2[0] if labels2 else prop2_name
-                            
-                            inverse_candidates.append((prop1, prop2, label1, label2, sources1, sources2))
-                            break
-                    
-                    # Also check for exact label-based patterns (case-insensitive)
-                    if labels1 and labels2:
-                        for label1 in labels1:
-                            for label2 in labels2:
-                                label1_clean = label1.lower().strip()
-                                label2_clean = label2.lower().strip()
-                                
-                                for pattern1, pattern2 in inverse_patterns:
-                                    if ((pattern1.lower() == label1_clean and pattern2.lower() == label2_clean) or
-                                        (pattern2.lower() == label1_clean and pattern1.lower() == label2_clean)):
-                                        inverse_candidates.append((prop1, prop2, label1, label2, sources1, sources2))
-                                        break
+                            for pattern1, pattern2 in inverse_patterns:
+                                if ((pattern1.lower() == label1_clean and pattern2.lower() == label2_clean) or
+                                    (pattern2.lower() == label1_clean and pattern1.lower() == label2_clean)):
+                                    if self.agnostic:
+                                        inverse_candidates.append((prop1, prop2, label1, label2, sources1, sources2, local1, local2))
+                                    else:
+                                        inverse_candidates.append((prop1, prop2, label1, label2, sources1, sources2, None, None))
+                                    break
         
         # Remove duplicates
         unique_candidates = []
         seen = set()
-        for p1, p2, l1, l2, s1, s2 in inverse_candidates:
+        for candidate in inverse_candidates:
+            p1, p2 = candidate[0], candidate[1]
             pair = tuple(sorted([p1, p2]))
             if pair not in seen:
                 seen.add(pair)
-                unique_candidates.append((p1, p2, l1, l2, s1, s2))
+                unique_candidates.append(candidate)
         
         if unique_candidates:
-            print(f"Found {len(unique_candidates)} potential inverse property pairs:")
+            mode_suffix = " (namespace-agnostic)" if self.agnostic else ""
+            print(f"Found {len(unique_candidates)} potential inverse property pairs{mode_suffix}:")
             # Show more results since we're being more selective
-            for p1, p2, l1, l2, s1, s2 in unique_candidates[:25]:  # Show first 25
-                print(f"\n🔗 {p1} ({l1})")
+            for candidate in unique_candidates[:25]:  # Show first 25
+                p1, p2, l1, l2, s1, s2 = candidate[:6]
+                
+                if self.agnostic and len(candidate) > 6:
+                    local1, local2 = candidate[6], candidate[7]
+                    print(f"\n🔗 {p1}")
+                    print(f"   Local name: {local1} | Label: ({l1})")
+                else:
+                    print(f"\n🔗 {p1} ({l1})")
                 print(f"   Sources: {', '.join(s1)}")
-                print(f"   ↔️  {p2} ({l2})")
+                
+                if self.agnostic and len(candidate) > 6:
+                    print(f"   ↔️  {p2}")
+                    print(f"   Local name: {local2} | Label: ({l2})")
+                else:
+                    print(f"   ↔️  {p2} ({l2})")
                 print(f"   Sources: {', '.join(s2)}")
             
             if len(unique_candidates) > 25:
@@ -551,6 +863,10 @@ def main():
                        help='Output directory for log files (default: logs)')
     parser.add_argument('--log-name', '-l',
                        help='Custom log file name (default: auto-generated)')
+    parser.add_argument('--agnostic', '-a',
+                       action='store_true',
+                       default=False,
+                       help='Enable namespace-agnostic mode: compare URIs by local name across namespaces')
     
     args = parser.parse_args()
     
@@ -582,10 +898,12 @@ def main():
             log_file = output_dir / f"conflict_analysis_multi_{timestamp}.log"
     
     print(f"Analyzing {len(valid_files)} ontology file(s)")
+    if args.agnostic:
+        print("Mode: Namespace-agnostic (comparing by local names)")
     print(f"Output log: {log_file}")
     
     try:
-        detector = OntologyConflictDetector(valid_files, str(log_file))
+        detector = OntologyConflictDetector(valid_files, str(log_file), agnostic=args.agnostic)
         detector.run_full_analysis()
         print(f"\nAnalysis complete. Results saved to: {log_file}")
         
